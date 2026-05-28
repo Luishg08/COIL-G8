@@ -103,13 +103,15 @@ ESCENARIOS QUE DEBES CUBRIR (mínimo 5 funciones de prueba)
 5. Combinación FEFO + bloqueo — hay lotes bloqueados y aptos; FEFO aplica solo sobre los aptos.
 
 ════════════════════════════════════════════
-REGLAS FINALES
+REGLAS FINALES — léelas antes de escribir cualquier línea
 ════════════════════════════════════════════
 
 - Genera SOLO código Python puro, sin markdown, sin explicaciones, sin bloques ```.
 - Todos los "id" deben ser enteros (1, 2, 3), nunca cadenas como "L-001".
 - Usa los casos del archivo casos_prueba.md como fuente de datos para los tests.
 - No inventes comportamientos que no estén en engine.py.
+- PROHIBIDO usar @pytest.mark.parametrize. Escribe una función def test_xxx(): separada por cada caso.
+- El parámetro inventario de gestionar_despacho es SIEMPRE una lista Python []. Aunque haya varios lotes, van DENTRO de la misma lista: inventario = [{...}, {...}, {...}]. NUNCA pases los dicts como argumentos sueltos.
 
 ## Código fuente — src/engine.py:
 {engine_code}
@@ -173,6 +175,16 @@ def _sanitize_code(code: str) -> str:
             break
 
     body = "\n".join(lines[body_start:])
+
+    # 3. Si el LLM usó @pytest.mark.parametrize ignorando la prohibición,
+    #    lo avisamos pero dejamos pasar — el compile() siguiente detectará
+    #    si el parametrize está malformado y lo reportará con claridad.
+    if "@pytest.mark.parametrize" in body:
+        print(
+            "[agent] AVISO: el LLM generó @pytest.mark.parametrize. "
+            "Si falla la colección, vuelve a ejecutar guardian.py."
+        )
+
     return _REQUIRED_HEADER + "\n" + body
 
 
