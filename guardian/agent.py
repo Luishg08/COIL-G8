@@ -4,6 +4,10 @@ Quality Guardian — Agente LangChain para generación automática de pruebas Py
 Lee src/engine.py y docs/casos_prueba.md, invoca Llama 3 8B vía Ollama y
 produce test_generated.py con casos que cubren FEFO, bloqueo de seguridad
 y stock insuficiente.
+
+Si el LLM produce código incompatible (parametrize mal formado, imports
+incorrectos), el agente aplica un generador determinista como respaldo que
+parsea casos_prueba.md directamente y garantiza tests válidos.
 """
 
 import re
@@ -111,7 +115,7 @@ REGLAS FINALES — léelas antes de escribir cualquier línea
 - Usa los casos del archivo casos_prueba.md como fuente de datos para los tests.
 - No inventes comportamientos que no estén en engine.py.
 - PROHIBIDO usar @pytest.mark.parametrize. Escribe una función def test_xxx(): separada por cada caso.
-- El parámetro inventario de gestionar_despacho es SIEMPRE una lista Python []. Aunque haya varios lotes, van DENTRO de la misma lista: inventario = [{{...}}, {{...}}, {{...}}]. NUNCA pases los dicts como argumentos sueltos.
+- El parámetro inventario es SIEMPRE una lista []. Aunque haya varios lotes, van DENTRO de la misma lista: inventario = [{{...}}, {{...}}, {{...}}]. NUNCA pases los dicts como argumentos sueltos.
 
 ## Código fuente — src/engine.py:
 {engine_code}
@@ -122,12 +126,11 @@ REGLAS FINALES — léelas antes de escribir cualquier línea
 Genera ÚNICAMENTE el código Python del archivo test_generated.py:\
 """
 
-
 _REQUIRED_HEADER = (
     "import sys\n"
     "import pytest\n"
     "from pathlib import Path\n\n"
-    "sys.path.insert(0, str(Path(__file__).parent / \"src\"))\n"
+    'sys.path.insert(0, str(Path(__file__).parent / "src"))\n'
     "from engine import gestionar_despacho\n"
 )
 
@@ -141,6 +144,85 @@ _FUNCTION_ALIASES = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Generador determinista de respaldo
+# ---------------------------------------------------------------------------
+
+def _parse_casos_from_md() -> list[dict]:
+    """Parsea casos_prueba.md y devuelve lista de casos estructurados."""
+    content = CASOS_PATH.read_text(encoding="utf-8")
+    cases = []
+
+    for block in re.split(r"(?=\n## CASO \d+)", content):
+        if not re.match(r"\n## CASO \d+", block):
+            continue
+
+        inv = re.search(r"\*\*Inventario\*\*\s*\|\s*`(\[.*?\])`", block, re.DOTALL)
+        pedido = re.search(r"\*\*Pedido\*\*\s*\|\s*(\d+)", block)
+        fecha = re.search(r'\*\*Fecha sistema\*\*\s*\|\s*`"([^"]+)"`', block)
+        criterios_block = re.search(
+            r"\*\*Criterios de aceptación:\*\*\n(.*?)(?=\n---|$)",
+            block, re.DOTALL
+        )
+
+        if not (inv and pedido and fecha):
+            continue
+
+        raw_criterios = []
+        if criterios_block:
+            for line in criterios_block.group(1).splitlines():
+                line = line.strip()
+                if line.startswith("-"):
+                    raw_criterios.append(line)
+
+        cases.append({
+            "inventario": inv.group(1),
+            "pedido": int(pedido.group(1)),
+            "fecha": fecha.group(1),
+            "criterios": raw_criterios,
+        })
+
+    return cases
+
+
+def _build_fallback_tests() -> str:
+    """Genera test_generated.py directamente desde casos_prueba.md.
+
+    Se usa cuando el LLM produce @pytest.mark.parametrize o código
+    con estructura incorrecta. El resultado siempre es pytest válido.
+    """
+    cases = _parse_casos_from_md()
+    lines = [_REQUIRED_HEADER]
+
+    for i, case in enumerate(cases, 1):
+        assertions: list[str] = []
+        is_error = False
+
+        for raw in case["criterios"]:
+            for expr in re.findall(r"`([^`]+)`", raw):
+                if "pytest.raises" in expr:
+                    is_error = True
+                else:
+                    assertions.append(expr)
+
+        lines.append(f"\ndef test_caso_{i:02d}():")
+        lines.append(f'    inventario = {case["inventario"]}')
+
+        if is_error:
+            lines.append('    with pytest.raises(ValueError, match="Stock Insuficiente"):')
+            lines.append(f'        gestionar_despacho(inventario, {case["pedido"]}, "{case["fecha"]}")')
+        else:
+            lines.append(f'    resultado = gestionar_despacho(inventario, {case["pedido"]}, "{case["fecha"]}")')
+            for assertion in assertions:
+                lines.append(f"    assert {assertion}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Extracción y sanitización del output del LLM
+# ---------------------------------------------------------------------------
+
 def _extract_python(text: str) -> str:
     """Extrae código Python limpio de la respuesta del LLM."""
     match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
@@ -153,17 +235,16 @@ def _extract_python(text: str) -> str:
 
 
 def _sanitize_code(code: str) -> str:
-    """Normaliza el código generado: corrige imports y nombre de función.
+    """Normaliza el código del LLM: imports correctos, nombre de función.
 
-    El LLM pequeño suele usar placeholders ('your_module', 'generate_order').
-    Esta función los reemplaza con los valores reales de forma determinista.
+    Si detecta @pytest.mark.parametrize activa el generador determinista
+    que siempre produce código válido desde casos_prueba.md.
     """
     # 1. Normalizar nombre de función
     for alias in _FUNCTION_ALIASES:
         code = re.sub(rf"\b{alias}\b", "gestionar_despacho", code)
 
-    # 2. Eliminar el bloque de imports/comentarios al inicio del archivo
-    #    y reemplazarlo por la cabecera correcta.
+    # 2. Reemplazar bloque de imports por la cabecera correcta
     lines = code.splitlines()
     body_start = 0
     for i, line in enumerate(lines):
@@ -173,20 +254,19 @@ def _sanitize_code(code: str) -> str:
             body_start = i + 1
         else:
             break
-
     body = "\n".join(lines[body_start:])
 
-    # 3. Si el LLM usó @pytest.mark.parametrize ignorando la prohibición,
-    #    lo avisamos pero dejamos pasar — el compile() siguiente detectará
-    #    si el parametrize está malformado y lo reportará con claridad.
+    # 3. Si el LLM ignoró la prohibición de parametrize, usar respaldo determinista
     if "@pytest.mark.parametrize" in body:
-        print(
-            "[agent] AVISO: el LLM generó @pytest.mark.parametrize. "
-            "Si falla la colección, vuelve a ejecutar guardian.py."
-        )
+        print("[agent] LLM generó parametrize — activando generador determinista.")
+        return _build_fallback_tests()
 
     return _REQUIRED_HEADER + "\n" + body
 
+
+# ---------------------------------------------------------------------------
+# Punto de entrada principal
+# ---------------------------------------------------------------------------
 
 def generate_tests(model: str = "llama3") -> Path:
     """Genera test_generated.py usando Llama 3 8B vía Ollama.
@@ -214,8 +294,8 @@ def generate_tests(model: str = "llama3") -> Path:
         compile(python_code, "<test_generated>", "exec")
     except SyntaxError as exc:
         raise RuntimeError(
-            f"El LLM generó código con error de sintaxis: {exc}\n"
-            f"Fragmento recibido:\n{python_code[:400]}"
+            f"El código generado tiene error de sintaxis: {exc}\n"
+            f"Fragmento:\n{python_code[:400]}"
         ) from exc
 
     OUTPUT_PATH.write_text(python_code, encoding="utf-8")
