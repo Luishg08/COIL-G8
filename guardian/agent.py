@@ -111,7 +111,7 @@ REGLAS FINALES — léelas antes de escribir cualquier línea
 - Usa los casos del archivo casos_prueba.md como fuente de datos para los tests.
 - No inventes comportamientos que no estén en engine.py.
 - PROHIBIDO usar @pytest.mark.parametrize. Escribe una función def test_xxx(): separada por cada caso.
-- El parámetro inventario de gestionar_despacho es SIEMPRE una lista Python []. Aunque haya varios lotes, van DENTRO de la misma lista: inventario = [{...}, {...}, {...}]. NUNCA pases los dicts como argumentos sueltos.
+- El parámetro inventario de gestionar_despacho es SIEMPRE una lista Python []. Aunque haya varios lotes, van DENTRO de la misma lista: inventario = [{{...}}, {{...}}, {{...}}]. NUNCA pases los dicts como argumentos sueltos.
 
 ## Código fuente — src/engine.py:
 {engine_code}
