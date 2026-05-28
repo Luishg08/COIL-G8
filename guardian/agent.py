@@ -121,6 +121,24 @@ Genera ÚNICAMENTE el código Python del archivo test_generated.py:\
 """
 
 
+_REQUIRED_HEADER = (
+    "import sys\n"
+    "import pytest\n"
+    "from pathlib import Path\n\n"
+    "sys.path.insert(0, str(Path(__file__).parent / \"src\"))\n"
+    "from engine import gestionar_despacho\n"
+)
+
+# Nombres alternativos que Llama 3 suele inventar para gestionar_despacho
+_FUNCTION_ALIASES = (
+    "generate_order",
+    "manage_dispatch",
+    "dispatch_order",
+    "gestionar_pedido",
+    "process_order",
+)
+
+
 def _extract_python(text: str) -> str:
     """Extrae código Python limpio de la respuesta del LLM."""
     match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
@@ -130,6 +148,32 @@ def _extract_python(text: str) -> str:
     if match:
         return match.group(1).strip()
     return text.strip()
+
+
+def _sanitize_code(code: str) -> str:
+    """Normaliza el código generado: corrige imports y nombre de función.
+
+    El LLM pequeño suele usar placeholders ('your_module', 'generate_order').
+    Esta función los reemplaza con los valores reales de forma determinista.
+    """
+    # 1. Normalizar nombre de función
+    for alias in _FUNCTION_ALIASES:
+        code = re.sub(rf"\b{alias}\b", "gestionar_despacho", code)
+
+    # 2. Eliminar el bloque de imports/comentarios al inicio del archivo
+    #    y reemplazarlo por la cabecera correcta.
+    lines = code.splitlines()
+    body_start = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "" or stripped.startswith("#") or \
+                stripped.startswith("import ") or stripped.startswith("from "):
+            body_start = i + 1
+        else:
+            break
+
+    body = "\n".join(lines[body_start:])
+    return _REQUIRED_HEADER + "\n" + body
 
 
 def generate_tests(model: str = "llama3") -> Path:
@@ -152,6 +196,7 @@ def generate_tests(model: str = "llama3") -> Path:
     raw_output = chain.invoke({"engine_code": engine_code, "casos_text": casos_text})
 
     python_code = _extract_python(raw_output)
+    python_code = _sanitize_code(python_code)
 
     try:
         compile(python_code, "<test_generated>", "exec")
