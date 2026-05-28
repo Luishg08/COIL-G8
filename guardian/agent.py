@@ -21,25 +21,95 @@ OUTPUT_PATH = PROJECT_ROOT / "test_generated.py"
 
 _PROMPT_TEMPLATE = """\
 Eres un experto en Python y pruebas unitarias con pytest.
-A continuación encontrarás el código fuente de un motor de despacho FEFO y los
-casos de prueba documentados.
+Tu única tarea es generar el contenido de test_generated.py a partir del \
+código fuente y los casos de prueba que se muestran al final.
 
-Tu tarea: generar un archivo Python válido con pruebas pytest que cubran
-exactamente los tres escenarios siguientes:
+════════════════════════════════════════════
+BLOQUE DE CABECERA — cópialo EXACTAMENTE al inicio del archivo generado:
+════════════════════════════════════════════
 
-1. **FEFO** — cuando hay varios lotes aptos, se despacha primero el que vence
-   antes (fecha de vencimiento más próxima a fecha_sistema).
-2. **Bloqueo de seguridad** — un lote que vence en 3 días o menos está bloqueado
-   y no se despacha; uno que vence en 4 días o más sí se despacha.
-3. **Stock insuficiente** — cuando la suma de unidades aptas es menor al pedido,
-   se lanza ValueError con mensaje exacto "Stock Insuficiente".
+import sys
+import pytest
+from pathlib import Path
 
-Reglas para el archivo generado:
-- La primera sección debe añadir src/ al sys.path usando Path(__file__).
-- Importar gestionar_despacho desde engine (no desde src.engine).
-- Usar pytest.raises(ValueError, match=...) para los casos de error.
-- Incluir al menos una función de prueba por cada uno de los 3 escenarios.
-- NO incluir markdown, bloques de código ni explicaciones: solo código Python puro.
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from engine import gestionar_despacho
+
+════════════════════════════════════════════
+ESTRUCTURA OBLIGATORIA DE CADA ELEMENTO DE INVENTARIO
+════════════════════════════════════════════
+
+Cada lote del inventario es un dict Python con EXACTAMENTE estas cuatro claves:
+  "id"         → entero (1, 2, 3 …) NUNCA cadena
+  "lote"       → cadena (ej. "L-001")
+  "cantidad"   → entero (unidades disponibles)
+  "vencimiento"→ cadena con formato "YYYY-MM-DD"
+
+Ejemplo correcto:
+  inventario = [
+      {{"id": 1, "lote": "L-001", "cantidad": 50, "vencimiento": "2026-06-30"}},
+      {{"id": 2, "lote": "L-002", "cantidad": 20, "vencimiento": "2026-07-15"}},
+  ]
+
+════════════════════════════════════════════
+PATRONES DE PRUEBA — úsalos como plantilla exacta
+════════════════════════════════════════════
+
+# Patrón A — despacho exitoso:
+def test_nombre_descriptivo():
+    inventario = [
+        {{"id": 1, "lote": "L-XXX", "cantidad": 30, "vencimiento": "2026-06-10"}},
+        {{"id": 2, "lote": "L-YYY", "cantidad": 30, "vencimiento": "2026-07-15"}},
+    ]
+    resultado = gestionar_despacho(inventario, 25, "2026-05-27")
+    assert len(resultado) == 1
+    assert resultado[0]["lote"] == "L-XXX"
+    assert resultado[0]["cantidad_despachada"] == 25
+    assert resultado[0]["saldo_restante"] == 5
+
+# Patrón B — error de stock insuficiente (usa este match EXACTO, respeta mayúsculas):
+def test_stock_insuficiente():
+    inventario = [
+        {{"id": 1, "lote": "L-ZZZ", "cantidad": 3, "vencimiento": "2026-09-01"}},
+    ]
+    with pytest.raises(ValueError, match="Stock Insuficiente"):
+        gestionar_despacho(inventario, 10, "2026-05-27")
+
+# Patrón C — lote bloqueado (vence en ≤ 3 días se excluye; el apto sí se usa):
+def test_bloqueo_seguridad():
+    inventario = [
+        {{"id": 1, "lote": "L-BLQ", "cantidad": 40, "vencimiento": "2026-05-30"}},  # bloqueado: 3 días
+        {{"id": 2, "lote": "L-APT", "cantidad": 30, "vencimiento": "2026-08-01"}},  # apto
+    ]
+    resultado = gestionar_despacho(inventario, 15, "2026-05-27")
+    assert len(resultado) == 1
+    assert resultado[0]["lote"] == "L-APT"
+
+════════════════════════════════════════════
+STRINGS DE match= PARA pytest.raises — úsalos literalmente
+════════════════════════════════════════════
+
+  Stock insuficiente : match="Stock Insuficiente"
+  Fecha inválida     : match="fecha_sistema inválida"
+
+════════════════════════════════════════════
+ESCENARIOS QUE DEBES CUBRIR (mínimo 5 funciones de prueba)
+════════════════════════════════════════════
+
+1. FEFO básico — con dos lotes aptos, se despacha primero el que vence antes.
+2. Fragmentación — el pedido supera la cantidad del primer lote; el motor combina lotes.
+3. Bloqueo exacto en 3 días — el lote queda excluido; solo el apto recibe despacho.
+4. Stock insuficiente — suma de aptos < pedido → ValueError("Stock Insuficiente").
+5. Combinación FEFO + bloqueo — hay lotes bloqueados y aptos; FEFO aplica solo sobre los aptos.
+
+════════════════════════════════════════════
+REGLAS FINALES
+════════════════════════════════════════════
+
+- Genera SOLO código Python puro, sin markdown, sin explicaciones, sin bloques ```.
+- Todos los "id" deben ser enteros (1, 2, 3), nunca cadenas como "L-001".
+- Usa los casos del archivo casos_prueba.md como fuente de datos para los tests.
+- No inventes comportamientos que no estén en engine.py.
 
 ## Código fuente — src/engine.py:
 {engine_code}
@@ -82,6 +152,15 @@ def generate_tests(model: str = "llama3") -> Path:
     raw_output = chain.invoke({"engine_code": engine_code, "casos_text": casos_text})
 
     python_code = _extract_python(raw_output)
+
+    try:
+        compile(python_code, "<test_generated>", "exec")
+    except SyntaxError as exc:
+        raise RuntimeError(
+            f"El LLM generó código con error de sintaxis: {exc}\n"
+            f"Fragmento recibido:\n{python_code[:400]}"
+        ) from exc
+
     OUTPUT_PATH.write_text(python_code, encoding="utf-8")
     print(f"[agent] Pruebas escritas en: {OUTPUT_PATH}")
     return OUTPUT_PATH
