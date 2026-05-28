@@ -50,7 +50,12 @@ def _run_container() -> int:
 
 
 def _parse_report() -> dict:
-    """Lee .report.json y construye el resumen con veredicto."""
+    """Lee .report.json y construye el resumen con veredicto.
+
+    Cuenta tanto los tests fallidos como los errores de colección
+    (p.ej. ImportError en el módulo de tests), que pytest-json-report
+    registra en 'collectors' con outcome='failed', no en 'summary.failed'.
+    """
     if not REPORT_FILE.exists():
         raise FileNotFoundError(
             f"No se encontró el reporte en {REPORT_FILE}. "
@@ -62,12 +67,20 @@ def _parse_report() -> dict:
 
     passed = summary.get("passed", 0)
     failed = summary.get("failed", 0)
-    bugs_detectados = failed
-    veredicto = "APROBADO" if failed == 0 else "RECHAZADO"
+
+    # Errores de colección (ImportError, SyntaxError al cargar el test file)
+    collectors = report.get("collectors", [])
+    collection_errors = sum(
+        1 for c in collectors
+        if c.get("outcome") == "failed" and c.get("nodeid") not in ("", ".")
+    )
+
+    bugs_detectados = failed + collection_errors
+    veredicto = "APROBADO" if bugs_detectados == 0 else "RECHAZADO"
 
     return {
         "passed": passed,
-        "failed": failed,
+        "failed": failed + collection_errors,
         "bugs_detectados": bugs_detectados,
         "veredicto": veredicto,
     }
